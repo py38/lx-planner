@@ -6,7 +6,8 @@ Application personnelle de planning et de gestion d'une entrepreneuse (prothési
 - App : https://py38.github.io/lx-planner/ — publiée automatiquement par GitHub Actions (`.github/workflows/deploy.yml`) à chaque `git push` sur `main` (tests + build ; les tests tournent à l'heure de Paris).
 - Code : https://github.com/py38/lx-planner (dépôt **public** : ne jamais y mettre de mot de passe, clé secrète ni donnée personnelle de clientes).
 - Données : Supabase, projet **lx-planner** (réf. `dkyknlssuuldepxptrpg`). Un seul compte utilisateur (celui de l'utilisatrice).
-  - ⚠️ La même organisation Supabase contient un autre projet (`ntybsfcciudyegvwzfcp`, app « saas reservation ») : **ne jamais y toucher**.
+  - Le projet est dans l'organisation Supabase **« LX Beauty »** (depuis le 25/11/2026), séparée de celle de son mari.
+  - ⚠️ Un autre projet existe dans l'ancienne organisation (`ntybsfcciudyegvwzfcp`, app « saas reservation ») : **ne jamais y toucher**.
   - La clé « publishable » dans `src/data/sync.ts` est publique par conception (sécurité par compte = RLS). Ne jamais utiliser ni committer la clé `service_role` / secrète.
 
 ## Lancer en local
