@@ -153,10 +153,12 @@ export class SyncEngine {
    * download: le compte a déjà des données → on remplace celles de cet appareil (nouvel appareil).
    * merge   : on garde les deux (la version la plus récente de chaque élément gagne).
    */
-  async linkDevice(mode: 'upload' | 'download' | 'merge') {
+  async linkDevice(mode: 'upload' | 'download' | 'merge' | 'replace') {
     const userId = this.session!.user.id;
     this.set({ needsFirstSyncChoice: undefined });
-    if (mode === 'download') {
+    if (mode === 'replace') {
+      await this.replaceAccountWithThisDevice(userId);
+    } else if (mode === 'download') {
       await this.store.db.clearAll();
       this.store.state = Object.fromEntries(COLLECTIONS.map((c) => [c, {}])) as unknown as DataState;
     } else {
@@ -169,6 +171,40 @@ export class SyncEngine {
     if (mode === 'download' && !this.store.settings) {
       // compte sans réglages (cas improbable) : on recrée les valeurs par défaut
       await this.store.init({ seed: true });
+    }
+  }
+
+  /**
+   * « Remplacer le contenu du compte par celui de cet appareil » :
+   *  1. toutes les données de cet appareil reçoivent un horodatage neuf (elles l'emportent sur le compte) ;
+   *  2. ce qui n'existe que dans le compte est marqué supprimé (et donc retiré aussi sur les autres appareils au prochain passage).
+   * Rien n'est effacé définitivement : les lignes du compte restent en base avec deleted = true.
+   */
+  private async replaceAccountWithThisDevice(userId: string) {
+    const local = new Set<string>();
+    const changes: { collection: CollectionName; record: any }[] = [];
+    let t = Date.now();
+    for (const c of COLLECTIONS) {
+      for (const r of Object.values(this.store.state[c]) as any[]) {
+        local.add(`${c}:${r.id}`);
+        changes.push({ collection: c, record: { ...r, updatedAt: new Date(t++).toISOString() } });
+      }
+    }
+    // horodatage neuf en local aussi, pour que l'état mémoire et la base locale restent identiques
+    this.store.applyRemote(changes);
+    await this.store.flushed();
+    await this.store.db.putMany(changes, { enqueue: true });
+    const { data, error } = await this.client!.from('records').select('collection,id,data').eq('deleted', false);
+    if (error) throw error;
+    const tombstones = ((data ?? []) as { collection: CollectionName; id: string; data: any }[])
+      .filter((r) => !local.has(`${r.collection}:${r.id}`))
+      .map((r) => {
+        const updated = new Date(t++).toISOString();
+        return { user_id: userId, collection: r.collection, id: r.id, data: { ...r.data, deleted: true, updatedAt: updated }, updated_at: updated, deleted: true };
+      });
+    for (let i = 0; i < tombstones.length; i += CHUNK) {
+      const { error: e } = await this.client!.from('records').upsert(tombstones.slice(i, i + CHUNK), { onConflict: 'user_id,collection,id' });
+      if (e) throw e;
     }
   }
 

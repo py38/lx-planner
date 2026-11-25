@@ -106,6 +106,9 @@ function SyncSection() {
           <div className="col">
             <button className="btn primary" style={{ whiteSpace: 'normal' }} onClick={() => run(() => sync.linkDevice('download'))}>Récupérer les données du compte (recommandé pour un nouvel appareil)</button>
             <button className="btn" style={{ whiteSpace: 'normal' }} onClick={() => run(() => sync.linkDevice('merge'))}>Fusionner avec les données de cet appareil</button>
+            <button className="btn" style={{ whiteSpace: 'normal' }} onClick={async () => {
+              if (await ui.confirm('Le contenu actuel du compte sera remplacé par les données de cet appareil (ce qui n’existe que dans le compte sera retiré, y compris sur vos autres appareils). Continuer ?', { ok: 'Remplacer le compte', danger: true })) run(() => sync.linkDevice('replace'));
+            }}>Remplacer le contenu du compte par celui de cet appareil</button>
           </div>
           <p className="tiny faint">Conseil : exportez d’abord une sauvegarde de cet appareil si vous y avez saisi des choses importantes.</p>
         </Sheet>

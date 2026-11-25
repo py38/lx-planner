@@ -33,6 +33,7 @@ function fakeServer() {
         },
         select: (_c: string, opts?: any) => { q.head = opts?.head; return b; },
         gt: (col: string, v: string) => { q.filters.push((r: any) => r[col] > v); return b; },
+        eq: (col: string, v: unknown) => { q.filters.push((r: any) => r[col] === v); return b; },
         order: () => b,
         limit: (n: number) => { q.lim = n; return b; },
         then: (res: any, rej: any) => Promise.resolve(run()).then(res, rej),
@@ -121,5 +122,26 @@ describe('Synchronisation entre appareils (serveur simulé)', () => {
     await A.engine.syncNow();
     expect(await A.store.db.outbox()).toHaveLength(0);
     expect([...server.rows.values()].some((r) => r.data.title === 'Saisi sans réseau')).toBe(true);
+  });
+
+  it('remplacer le compte par cet appareil : pas de doublons des réglages de départ, l’iPhone suit', async () => {
+    const server = fakeServer();
+    const phone = await device(server, 'P'); // iPhone : réglages de départ seulement
+    await (phone.engine as any).linkDevice('upload');
+    const chrome = await device(server, 'C'); // Chrome : ses vraies données (autres identifiants de départ)
+    setStore(chrome.store);
+    const t = createItem({ title: 'call comptable', date: '2026-11-23' }) as Item;
+    await (chrome.engine as any).linkDevice('replace');
+    // le compte = exactement Chrome
+    const active = [...server.rows.values()].filter((r) => !r.deleted);
+    expect(active.filter((r) => r.collection === 'categories')).toHaveLength(7);
+    expect(active.filter((r) => r.collection === 'habits')).toHaveLength(chrome.store.list('habits').length);
+    expect(active.some((r) => r.id === t.id)).toBe(true);
+    // l'iPhone se synchronise : ses doublons disparaissent, il reçoit les données de Chrome
+    await phone.engine.syncNow();
+    expect(phone.store.list('categories')).toHaveLength(7);
+    expect(phone.store.list('habits')).toHaveLength(chrome.store.list('habits').length);
+    expect(phone.store.get('items', t.id)?.title).toBe('call comptable');
+    expect(new Set(phone.store.list('categories').map((c) => c.id))).toEqual(new Set(chrome.store.list('categories').map((c) => c.id)));
   });
 });
