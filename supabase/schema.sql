@@ -90,3 +90,25 @@ grant select, insert, delete on public.backups to authenticated;
 grant select on public.record_conflicts to authenticated;
 grant usage, select on all sequences in schema public to authenticated;
 revoke all on public.records, public.backups, public.record_conflicts from anon;
+
+-- 8. Images (couvertures de contenus, simulations de feed) : espace de stockage PRIVÉ.
+--    Chaque compte range ses images dans un dossier à son identifiant et ne peut accéder qu'à celui-ci.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('media', 'media', false, 10485760, array['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/gif'])
+on conflict (id) do nothing;
+
+drop policy if exists "media_own_read" on storage.objects;
+create policy "media_own_read" on storage.objects for select to authenticated
+  using (bucket_id = 'media' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists "media_own_insert" on storage.objects;
+create policy "media_own_insert" on storage.objects for insert to authenticated
+  with check (bucket_id = 'media' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists "media_own_update" on storage.objects;
+create policy "media_own_update" on storage.objects for update to authenticated
+  using (bucket_id = 'media' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists "media_own_delete" on storage.objects;
+create policy "media_own_delete" on storage.objects for delete to authenticated
+  using (bucket_id = 'media' and (storage.foldername(name))[1] = auth.uid()::text);

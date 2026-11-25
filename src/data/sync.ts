@@ -7,6 +7,7 @@ import { getStore, type Store } from './store';
 import { COLLECTIONS, type CollectionName, type DataState } from './types';
 import type { OutboxEntry } from './db';
 import { runMigrations } from './migrations';
+import { retryMissingMedia, setRemoteMediaFetcher } from './media';
 
 const CONFIG_KEY = 'lx-supabase-config';
 const PULL_OVERLAP_MS = 5 * 60 * 1000;
@@ -22,6 +23,8 @@ export interface SyncStatus {
   error?: string;
   pending: number;
   needsFirstSyncChoice?: { remoteCount: number };
+  /** images envoyées dans le compte pendant cette session */
+  mediaSent?: number;
 }
 
 interface RemoteRow {
@@ -91,9 +94,11 @@ export class SyncEngine {
     this.session = data.session;
     this.client.auth.onAuthStateChange((_e, s) => {
       this.session = s;
+      this.installMediaFetcher();
       this.set({ phase: s ? 'idle' : 'signed-out', email: s?.user.email });
     });
     this.set({ phase: this.session ? 'idle' : 'signed-out', email: this.session?.user.email });
+    this.installMediaFetcher();
     this.store.onLocalChange = () => this.schedule(2000);
     window.addEventListener('online', () => this.schedule(500));
     window.addEventListener('offline', () => this.set({ phase: 'offline' }));
@@ -222,10 +227,13 @@ export class SyncEngine {
         await this.pull();
         // d'anciennes « idées » venant d'un autre appareil deviennent des fiches contenu (mêmes identifiants → sans doublon)
         runMigrations(this.store);
+        // images : non bloquant (une image non envoyée est retentée au prochain passage)
+        let mediaError: string | undefined;
+        try { await this.syncMedia(); } catch (e: any) { mediaError = `Images pas encore envoyées : ${e?.message ?? e}`; console.warn(mediaError); }
         const now = new Date().toISOString();
         await this.store.db.setMeta('lastSyncAt', now);
         await this.maybeBackup();
-        this.set({ phase: 'idle', lastSyncAt: now, pending: (await this.store.db.outbox()).length });
+        this.set({ phase: 'idle', lastSyncAt: now, pending: (await this.store.db.outbox()).length, error: mediaError });
       } catch (e) {
         this.fail(e);
       } finally {
@@ -301,6 +309,48 @@ export class SyncEngine {
       this.store.applyRemote(apply);
       await this.store.flushed();
     }
+  }
+
+  // ---------- Images (Supabase Storage, espace privé « media/<compte>/<image>.jpg ») ----------
+  private mediaPath = (id: string) => `${this.session!.user.id}/${id}`;
+
+  /** Images utilisées par les fiches (couvertures) et les simulations de feed. */
+  private referencedMedia(): string[] {
+    const ids = new Set<string>();
+    for (const c of Object.values(this.store.state.contents)) if (!c.deleted && c.coverMediaId) ids.add(c.coverMediaId);
+    for (const f of Object.values(this.store.state.feeds)) if (!f.deleted) for (const t of f.tiles) if (t.mediaId) ids.add(t.mediaId);
+    return [...ids];
+  }
+
+  /** Envoie les images présentes sur cet appareil et pas encore dans le compte (y compris celles d'avant la synchronisation). */
+  async syncMedia(): Promise<number> {
+    if (!this.client || !this.session) return 0;
+    const key = `mediaUploaded:${this.session.user.id}`;
+    const done = new Set(await this.store.db.getMeta<string[]>(key) ?? []);
+    let sent = 0;
+    for (const id of this.referencedMedia()) {
+      if (done.has(id)) continue;
+      const blob = await this.store.db.getMedia(id);
+      if (!blob) continue; // image ajoutée sur un autre appareil : elle sera téléchargée à l'affichage
+      const { error } = await this.client.storage.from('media').upload(this.mediaPath(id), blob, { upsert: true, contentType: blob.type || 'image/jpeg' });
+      if (error) throw error;
+      done.add(id);
+      sent++;
+      await this.store.db.setMeta(key, [...done]);
+    }
+    if (sent) this.set({ mediaSent: (this.status.mediaSent ?? 0) + sent });
+    retryMissingMedia();
+    return sent;
+  }
+
+  private installMediaFetcher() {
+    if (!this.client || !this.session) { setRemoteMediaFetcher(null); return; }
+    setRemoteMediaFetcher(async (id) => {
+      if (!this.client || !this.session) return null;
+      const { data, error } = await this.client.storage.from('media').download(this.mediaPath(id));
+      if (error || !data) return null;
+      return data;
+    });
   }
 
   // ---------- Sauvegardes distantes ----------

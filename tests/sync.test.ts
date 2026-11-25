@@ -13,7 +13,17 @@ function fakeServer() {
   const conflicts: any[] = [];
   let clock = 0;
   const nextTs = () => new Date(Date.UTC(2030, 0, 1) + ++clock).toISOString();
+  const files = new Map<string, Blob>();
   const client: any = {
+    storage: {
+      from: (bucket: string) => ({
+        upload: async (path: string, blob: Blob) => { files.set(`${bucket}/${path}`, blob); return { error: null }; },
+        download: async (path: string) => {
+          const f = files.get(`${bucket}/${path}`);
+          return f ? { data: f, error: null } : { data: null, error: { message: 'Object not found' } };
+        },
+      }),
+    },
     from(table: string) {
       if (table === 'backups') return { insert: async () => ({ error: null }) };
       const q: any = { filters: [] as ((r: any) => boolean)[], lim: 1e9 };
@@ -41,7 +51,7 @@ function fakeServer() {
       return b;
     },
   };
-  return { client, rows, conflicts };
+  return { client, rows, conflicts, files };
 }
 
 async function device(server: ReturnType<typeof fakeServer>, name: string) {
@@ -143,5 +153,28 @@ describe('Synchronisation entre appareils (serveur simulé)', () => {
     expect(phone.store.list('habits')).toHaveLength(chrome.store.list('habits').length);
     expect(phone.store.get('items', t.id)?.title).toBe('call comptable');
     expect(new Set(phone.store.list('categories').map((c) => c.id))).toEqual(new Set(chrome.store.list('categories').map((c) => c.id)));
+  });
+
+  it('images : envoyées depuis Chrome, téléchargées sur l’iPhone à l’affichage, puis gardées hors connexion', async () => {
+    const { mediaUrl } = await import('../src/data/media');
+    const server = fakeServer();
+    const chrome = await device(server, 'IMG-C');
+    setStore(chrome.store);
+    await chrome.store.db.putMedia('img-1', new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+    await chrome.store.db.putMedia('img-2', new Blob(['feed-bytes'], { type: 'image/jpeg' }));
+    chrome.store.create('contents', { title: 'Collab', format: 'reel', platforms: ['instagram'], checks: {}, coverMediaId: 'img-1' } as any);
+    chrome.store.create('feeds', { name: 'Option A', aspect: '3:4', tiles: [{ id: 't', mediaId: 'img-2' }] } as any);
+    await (chrome.engine as any).linkDevice('upload'); // les images d'avant la synchro partent aussi
+    expect([...server.files.keys()].sort()).toEqual(['media/user-1/img-1', 'media/user-1/img-2']);
+    expect(await chrome.engine.syncMedia()).toBe(0); // déjà envoyées : pas de renvoi
+
+    const phone = await device(server, 'IMG-P');
+    await (phone.engine as any).linkDevice('download');
+    setStore(phone.store);
+    expect(await phone.store.db.getMedia('img-1')).toBeUndefined();
+    (phone.engine as any).installMediaFetcher();
+    expect(await mediaUrl('img-1')).toMatch(/^blob:/);
+    expect(await phone.store.db.getMedia('img-1')).toBeTruthy(); // gardée sur l'appareil
+    expect(await mediaUrl('inexistante')).toBeNull();
   });
 });
