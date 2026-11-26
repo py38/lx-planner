@@ -245,6 +245,10 @@ export interface Settings extends BaseRecord {
   showContentInPlanning?: boolean;
   /** pause repas suggérée */
   mealBlock?: { enabled: boolean; start: TimeStr; duration: number };
+  /** date du dernier export « Exporter mes données » (rappel mensuel, partagé entre appareils) */
+  lastExportAt?: string;
+  /** rappel d'export mis de côté (« Plus tard ») jusqu'à cette date */
+  exportReminderSnoozedUntil?: string;
 }
 
 // ---------- Instagram & Développement ----------
@@ -299,6 +303,137 @@ export interface FeedSim extends BaseRecord {
   tiles: FeedTile[]; // ordre d'affichage : la 1re vignette = en haut à gauche (publication la plus récente)
 }
 
+// ---------- LX Academy Présentiel ----------
+// Préfixe « ac » : données de l'espace formation. Elles passent par la même synchronisation que le reste.
+
+/** Formatrice. Une seule aujourd'hui, mais la liste permet d'en ajouter (futur centre de formation). */
+export interface AcTrainer extends BaseRecord {
+  name: string;
+  email?: string;
+  phone?: string;
+  /** sélectionnée par défaut pour les nouvelles sessions */
+  isDefault?: boolean;
+  active: boolean;
+  order: number;
+}
+
+/** Lieu de formation (modifiable dans les paramètres). */
+export interface AcVenue extends BaseRecord {
+  name: string;
+  address: string;
+  /** nombre maximum de stagiaires accueillies en même temps (facultatif) */
+  maxTrainees?: number;
+  notes?: string;
+  isDefault?: boolean;
+  active: boolean;
+  order: number;
+}
+
+export type AcTrainingType = 'private_coaching' | 'initial' | 'advanced' | 'masterclass' | 'online_course' | 'mini_course';
+export type AcFormat = 'solo' | 'duo' | 'group';
+/**
+ * Modalité d'une offre (exigence E10) : présentiel = journées en salle avec session ; en ligne = accès à distance,
+ * SANS journée ni session présentielle ; mixte = les deux. Absente = présentiel (cas des offres créées avant).
+ */
+export type AcModality = 'onsite' | 'online' | 'hybrid';
+
+/**
+ * Conditions d'une offre à un moment donné (une version). Seul le prix est obligatoire :
+ * les champs « présentiel » ne concernent que le présentiel et le mixte, les champs « en ligne » que l'en ligne et le mixte.
+ */
+export interface AcOfferTerms {
+  /** prix par stagiaire, en centimes (50000 = 500 €) */
+  priceCents: number;
+  // ----- présentiel -----
+  /** nombre de stagiaires par session */
+  capacity?: number;
+  days?: number;
+  startTime?: TimeStr;
+  endTime?: TimeStr;
+  lunchMin?: number;
+  /** durée pédagogique par journée (minutes) */
+  pedagogicalMinPerDay?: number;
+  // ----- en ligne -----
+  /** durée d'accès en jours (vide = accès sans limite) */
+  accessDays?: number;
+  /** nombre de leçons ou de modules en ligne */
+  lessons?: number;
+  /** durée pédagogique totale estimée (minutes), sans notion de journée */
+  onlineMinutes?: number;
+  /** plateforme de cours (nom libre) */
+  platform?: string;
+}
+
+/** Offre du catalogue. Les inscriptions recopieront ses conditions : un changement de tarif n'est jamais rétroactif. */
+export interface AcOffer extends BaseRecord, AcOfferTerms {
+  code: string;
+  title: string;
+  type: AcTrainingType;
+  format: AcFormat;
+  /** absente sur les offres créées avant (= présentiel) : lire avec modalityOf() */
+  modality?: AcModality;
+  active: boolean;
+  order: number;
+  version: number;
+  /** versions précédentes des conditions, de la plus ancienne à la plus récente */
+  history: (AcOfferTerms & { version: number; validFrom: string; validUntil: string })[];
+}
+
+/** Contenu pédagogique d'un module à un moment donné (une version). */
+export interface AcModuleContent {
+  title: string;
+  objective: string;
+  content?: string;
+  /** durée prévisionnelle (minutes) */
+  durationMin?: number;
+  prerequisites?: string;
+  material?: string;
+  evaluationCriteria?: string;
+}
+
+/** Version précédente d'un module, conservée en entier (traçabilité pédagogique). */
+export type AcModuleVersion = AcModuleContent & {
+  version: number;
+  /** date de cette version */
+  versionDate: DateStr;
+  /** moment où elle a été remplacée (horodatage ISO) */
+  replacedAt: string;
+};
+
+/** Module de la bibliothèque pédagogique. */
+export interface AcModule extends BaseRecord, AcModuleContent {
+  code: string;
+  /** support PDF (importé en phase 3) */
+  pdfFileId?: ID;
+  version: number;
+  versionDate: DateStr;
+  /** versions précédentes complètes, de la plus ancienne à la plus récente (absent sur les modules jamais modifiés) */
+  history?: AcModuleVersion[];
+  status: 'active' | 'archived';
+  order: number;
+}
+
+/** Identité administrative de l'activité de formation (aucune valeur inventée : les champs inconnus restent vides). */
+export interface AcIdentity {
+  legalName?: string;
+  legalForm?: string;
+  tradeName?: string;
+  trainingBrand?: string;
+  siret?: string;
+  /** numéro de déclaration d'activité */
+  nda?: string;
+  address?: string;
+  email?: string;
+  phone?: string;
+  vatRegime?: string;
+  mediator?: string;
+}
+
+/** Réglages de l'espace LX Academy (un seul enregistrement, id « ac-settings »). */
+export interface AcSettings extends BaseRecord {
+  identity: AcIdentity;
+}
+
 export interface Collections {
   items: Item;
   series: Series;
@@ -315,11 +450,17 @@ export interface Collections {
   settings: Settings;
   contents: ContentPiece;
   feeds: FeedSim;
+  acTrainers: AcTrainer;
+  acVenues: AcVenue;
+  acOffers: AcOffer;
+  acModules: AcModule;
+  acSettings: AcSettings;
 }
 export type CollectionName = keyof Collections;
 export const COLLECTIONS: CollectionName[] = [
   'items', 'series', 'categories', 'objectives', 'projects', 'ideas',
   'habits', 'habitLogs', 'goals', 'goalLogs', 'challenges', 'reviews', 'settings', 'contents', 'feeds',
+  'acTrainers', 'acVenues', 'acOffers', 'acModules', 'acSettings',
 ];
 
 export type DataState = { [K in CollectionName]: Record<ID, Collections[K]> };

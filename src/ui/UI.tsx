@@ -95,7 +95,7 @@ export function UIProvider({ children }: { children: ReactNode }) {
       {confirmState && (
         <Sheet title={confirmState.opts.title ?? 'Confirmation'} onClose={() => { confirmState.resolve(false); setConfirm(null); }}
           footer={<>
-            <button className="btn" onClick={() => { confirmState.resolve(false); setConfirm(null); }}>{confirmState.opts.cancel ?? 'Annuler'}</button>
+            {confirmState.opts.cancel !== '' && <button className="btn" onClick={() => { confirmState.resolve(false); setConfirm(null); }}>{confirmState.opts.cancel ?? 'Annuler'}</button>}
             <button className={`btn primary`} style={confirmState.opts.danger ? { background: 'var(--danger)', borderColor: 'var(--danger)' } : undefined} onClick={() => { confirmState.resolve(true); setConfirm(null); }}>{confirmState.opts.ok ?? 'Confirmer'}</button>
           </>}>
           <div style={{ fontSize: 15 }}>{confirmState.text}</div>

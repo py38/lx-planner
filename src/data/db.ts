@@ -2,7 +2,7 @@
 // Chaque écriture est confirmée par IndexedDB avant d'être considérée comme sauvegardée.
 import { COLLECTIONS, type CollectionName, type DataState } from './types';
 
-const DB_VERSION = 2; // v2 : contenus, simulations de feed et images
+const DB_VERSION = 3; // v2 : contenus, simulations de feed et images ; v3 : LX Academy (formatrices, lieux, offres, modules)
 export const META = 'meta';
 export const OUTBOX = 'outbox';
 export const CONFLICTS = 'conflicts';
@@ -43,19 +43,31 @@ function txDone(tx: IDBTransaction): Promise<void> {
 export class LocalDB {
   private dbp: Promise<IDBDatabase>;
   constructor(public name = 'lx-planner', idb: IDBFactory = indexedDB) {
-    this.dbp = new Promise((resolve, reject) => {
-      const open = idb.open(name, DB_VERSION);
-      open.onupgradeneeded = () => {
-        const db = open.result;
+    const required = [...COLLECTIONS, META, OUTBOX, CONFLICTS, MEDIA];
+    const open = (version?: number) => new Promise<IDBDatabase>((resolve, reject) => {
+      const req = version ? idb.open(name, version) : idb.open(name);
+      req.onupgradeneeded = () => {
+        const db = req.result;
         for (const c of COLLECTIONS) if (!db.objectStoreNames.contains(c)) db.createObjectStore(c, { keyPath: 'id' });
         if (!db.objectStoreNames.contains(META)) db.createObjectStore(META);
         if (!db.objectStoreNames.contains(OUTBOX)) db.createObjectStore(OUTBOX, { keyPath: 'key' });
         if (!db.objectStoreNames.contains(CONFLICTS)) db.createObjectStore(CONFLICTS, { keyPath: 'key' });
         if (!db.objectStoreNames.contains(MEDIA)) db.createObjectStore(MEDIA);
       };
-      open.onsuccess = () => resolve(open.result);
-      open.onerror = () => reject(open.error);
-      open.onblocked = () => reject(new Error('Base locale bloquée par un autre onglet'));
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error('Base locale bloquée par un autre onglet'));
+    });
+    // Retour à une version précédente de l'app : la base de l'appareil a pu être créée par une version plus récente
+    // (numéro plus élevé). On l'ouvre alors telle quelle, sans rien effacer ; les tiroirs inconnus de cette version
+    // restent intacts et seront de nouveau utilisés quand l'app sera remise à jour.
+    this.dbp = open(DB_VERSION).catch(async (e) => {
+      if (e?.name !== 'VersionError') throw e;
+      const db = await open();
+      if (required.every((s) => db.objectStoreNames.contains(s))) return db;
+      const v = db.version;
+      db.close();
+      return open(v + 1); // ajoute seulement les tiroirs manquants
     });
   }
 

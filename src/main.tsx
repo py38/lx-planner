@@ -6,7 +6,7 @@ import '@fontsource/poppins/600.css';
 import './styles.css';
 import { App } from './App';
 import { getStore } from './data/store';
-import { getSync } from './data/sync';
+import { getSync, consumeAuthRedirect } from './data/sync';
 import { runMigrations } from './data/migrations';
 
 // une seule racine React, même si le module est ré-exécuté (rechargement à chaud en développement)
@@ -23,6 +23,9 @@ function Fatal({ error }: { error: string }) {
   );
 }
 
+// retour depuis un lien de confirmation e-mail : nettoyer l'adresse AVANT le premier affichage (jamais de connexion automatique)
+const authNotice = consumeAuthRedirect();
+
 (async () => {
   try {
     await getStore().init();
@@ -35,6 +38,7 @@ function Fatal({ error }: { error: string }) {
   // demande au navigateur de ne pas effacer automatiquement les données
   navigator.storage?.persist?.().catch(() => {});
   root.render(<App />);
+  if (authNotice) getSync().setNotice(authNotice);
   getSync().start().catch((e) => console.error(e));
   if ('serviceWorker' in navigator && import.meta.env.PROD) {
     navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch((e) => console.warn('Service worker', e));

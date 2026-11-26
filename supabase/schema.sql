@@ -69,6 +69,9 @@ create trigger records_lww before insert or update on public.records
   for each row execute function public.records_lww();
 
 -- 6. Ne garder que les 30 dernières sauvegardes par compte
+--    (30 au total, quotidiennes et « Sauvegarde de sécurité avant restauration » confondues : règle en place dans Supabase.)
+--    Évolution « 30 quotidiennes + 30 de sécurité » EN PAUSE (décision du 26/11/2026) : ne pas modifier cette fonction
+--    sans la procédure validée par l’utilisatrice (sauvegarde, lectures 4.A–4.C, essai annulé 4.D, accord explicite).
 create or replace function public.backups_prune() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin

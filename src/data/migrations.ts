@@ -4,6 +4,7 @@ import { contentFromIdea } from '../logic/contentPlan';
 import { projectSteps } from '../logic/progress';
 import type { ContentPiece } from './types';
 import { PASTEL_REMAP } from './defaults';
+import { academyModules, academyOffers, academySettings, academyTrainer, academyVenue } from './academyDefaults';
 
 /**
  * La Banque d'idées est désormais faite de fiches contenu (mêmes champs que le calendrier de contenu).
@@ -68,8 +69,25 @@ export function pastelizeCategories(store: Store): number {
   return n;
 }
 
+/**
+ * LX Academy Présentiel : catalogue, modules M01–M15, formatrice et lieu par défaut.
+ * Ajout pur (aucune donnée existante n'est touchée). Une fiche déjà présente — même modifiée ou supprimée — n'est jamais recréée.
+ */
+export function seedAcademy(store: Store): number {
+  let n = 0;
+  store.transact(() => {
+    for (const o of academyOffers()) if (store.seedIfAbsent('acOffers', o)) n++;
+    for (const m of academyModules()) if (store.seedIfAbsent('acModules', m)) n++;
+    if (store.seedIfAbsent('acTrainers', academyTrainer())) n++;
+    if (store.seedIfAbsent('acVenues', academyVenue())) n++;
+    if (store.seedIfAbsent('acSettings', academySettings())) n++;
+  });
+  return n;
+}
+
 export function runMigrations(store: Store) {
   pastelizeCategories(store);
   migrateIdeasToContents(store);
   retireLegacyContentProjects(store);
+  seedAcademy(store);
 }

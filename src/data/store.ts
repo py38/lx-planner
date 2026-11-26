@@ -132,6 +132,16 @@ export class Store {
     return record;
   }
 
+  /**
+   * Données de départ : écrit l'enregistrement tel quel (avec son horodatage) uniquement s'il n'existe pas encore,
+   * même supprimé. Un horodatage ancien garantit qu'une modification faite sur un autre appareil gagne toujours.
+   */
+  seedIfAbsent<C extends CollectionName>(c: C, record: Collections[C]): boolean {
+    if (this.state[c][record.id]) return false;
+    this.putRaw(c, record);
+    return true;
+  }
+
   /** Suppression logique : conservée comme « tombstone » pour que la suppression se synchronise entre appareils. */
   remove(c: CollectionName, id: ID) {
     const cur = this.state[c][id];
@@ -148,10 +158,24 @@ export class Store {
     this.commit(changes, false);
   }
 
-  /** Remplace toutes les données (restauration d'une sauvegarde). */
+  /**
+   * Remplace toutes les données (restauration d'une sauvegarde).
+   * L'appareil reste relié à son compte : sans cela, la synchronisation s'arrêtait en silence après une restauration.
+   * Le curseur de récupération repart du début, donc ce qui a été créé dans le compte après la sauvegarde est
+   * conservé (rien n'est supprimé) ; les fiches restaurées, plus récentes, l'emportent sur leurs anciennes versions.
+   */
   async replaceAll(data: DataState) {
     await this.flushed();
+    // conservés : le compte relié, et la sauvegarde de sécurité faite juste avant (pour pouvoir revenir en arrière)
+    const kept: [string, unknown][] = [];
+    for (const k of ['linkedUser', 'safetyBackups', 'safetyBackup', 'lastBackupAt']) {
+      const v = await this.db.getMeta(k);
+      if (v !== undefined && v !== null) kept.push([k, v]);
+    }
+    const conflicts = await this.db.conflicts(); // le journal des conflits de l'appareil n'est jamais effacé par une restauration
     await this.db.clearAll();
+    for (const [k, v] of kept) await this.db.setMeta(k, v);
+    for (const c of conflicts) await this.db.addConflict(c);
     this.state = emptyState();
     const changes: Change[] = [];
     for (const c of COLLECTIONS) for (const r of Object.values((data as any)[c] ?? {})) changes.push({ collection: c, record: r });

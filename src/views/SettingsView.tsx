@@ -1,7 +1,8 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { getStore, useData } from '../data/store';
-import { getSync, loadConfig, saveConfig, exportData, validateExport, type ExportFile } from '../data/sync';
+import { getSync, loadConfig, saveConfig, validateExport, restoreExport, makeSafetyBackup, safetyBackups, SAFETY_LABEL, isSafetyLabel, SAFETY_MAX, SAFETY_WARN, type ExportFile, type SafetyBackup, type ConflictView } from '../data/sync';
 import { useUI } from '../ui/UI';
+import { runExport } from '../data/exportFlow';
 import { Sheet } from '../ui/kit';
 import { notificationsSupported } from '../logic/reminders';
 import { IconDownload, IconUpload, IconCloud, IconTrash } from '../ui/Icons';
@@ -13,6 +14,7 @@ export function SettingsView() {
       <div className="page-head"><div className="title-block"><div className="eyebrow">Réglages</div><h1>Paramètres</h1></div></div>
       <SyncSection />
       <BackupSection />
+      <ConflictSection />
       <NotificationSection />
       <PreferencesSection />
       <CategoriesSection />
@@ -36,7 +38,7 @@ function SyncSection() {
   const [pwd, setPwd] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [backups, setBackups] = useState<{ id: number; created_at: string }[] | null>(null);
+  const [backups, setBackups] = useState<{ id: number; created_at: string; label?: string | null; made_at?: string | null }[] | null>(null);
   const envConfigured = !!import.meta.env.VITE_SUPABASE_URL;
 
   const run = async (fn: () => Promise<any>) => {
@@ -57,6 +59,12 @@ function SyncSection() {
     <div className="card">
       <div className="card-head"><h3><IconCloud size={15} /> Compte & synchronisation</h3><span className={`tag ${status.phase === 'idle' ? 'ok' : status.phase === 'error' ? 'danger' : status.phase === 'offline' || status.phase === 'syncing' ? 'warn' : ''}`}>{status.phase === 'idle' ? 'Actif' : status.phase === 'not-configured' ? 'Local uniquement' : status.phase === 'signed-out' ? 'Déconnectée' : status.phase === 'error' ? 'Erreur' : status.phase === 'offline' ? 'Hors ligne' : '…'}</span></div>
       <p className="small" style={{ marginTop: 0 }}>{phaseLabel[status.phase]}</p>
+      {status.notice && (
+        <div className={`banner ${status.notice.kind === 'error' ? 'danger' : 'soft'} small`} style={{ marginBottom: 10 }}>
+          <span style={{ flex: 1 }}>{status.notice.text}</span>
+          <button className="btn small ghost" onClick={() => sync.setNotice(undefined)}>OK</button>
+        </div>
+      )}
       {status.error && <div className="banner danger small" style={{ marginBottom: 10 }}>{translate(status.error)}</div>}
       {err && <div className="banner danger small" style={{ marginBottom: 10 }}>{err}</div>}
 
@@ -115,56 +123,207 @@ function SyncSection() {
       )}
 
       {backups && (
-        <Sheet title="Sauvegardes distantes" onClose={() => setBackups(null)}>
-          {backups.length ? backups.map((b) => (
-            <div key={b.id} className="row between" style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
-              <span>{new Date(b.created_at).toLocaleString('fr-FR')}</span>
-              <button className="btn small" onClick={async () => {
-                if (!(await ui.confirm('Remplacer toutes les données actuelles par cette sauvegarde ? (Elle sera ensuite synchronisée sur vos autres appareils.)', { ok: 'Restaurer', danger: true }))) return;
-                await run(async () => { const f = await sync.fetchBackup(b.id); await restore(f); setBackups(null); ui.toast('Sauvegarde restaurée'); });
-              }}>Restaurer</button>
+        <Sheet title="Sauvegardes en ligne" onClose={() => setBackups(null)}>
+          {([
+            ['Sauvegardes quotidiennes', backups.filter((b) => !isSafetyLabel(b.label)), 'Une par jour, automatiquement (les 30 dernières sont gardées).'],
+            ['Sauvegardes de sécurité avant restauration', backups.filter((b) => isSafetyLabel(b.label)).sort((a, b) => new Date(b.made_at ?? b.created_at).getTime() - new Date(a.made_at ?? a.created_at).getTime()), 'Faites juste avant chaque restauration (les 30 dernières sont gardées, à part). Une copie faite hors connexion est envoyée au retour du réseau.'],
+          ] as const).map(([title, rows, hint]) => (
+            <div key={title} style={{ marginBottom: 14 }}>
+              <div className="section-title">{title} ({rows.length})</div>
+              <p className="tiny faint" style={{ margin: '2px 0 4px' }}>{hint}</p>
+              {rows.length ? rows.map((b) => (
+                <div key={b.id} className="row between" style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
+                  <span className="col" style={{ gap: 2 }}>
+                    <span>{new Date(b.made_at ?? b.created_at).toLocaleString('fr-FR')}</span>
+                    {b.label && b.made_at && Math.abs(new Date(b.created_at).getTime() - new Date(b.made_at).getTime()) > 60_000 && (
+                      <span className="tiny faint">faite hors connexion, envoyée le {new Date(b.created_at).toLocaleString('fr-FR')}</span>
+                    )}
+                  </span>
+                  <button className="btn small" onClick={async () => {
+                    const when = new Date(b.made_at ?? b.created_at).toLocaleString('fr-FR');
+                    await run(async () => {
+                      if (await safeRestore(ui, async () => sync.fetchBackup(b.id), b.label ? `la « ${b.label} » du ${when}` : `la sauvegarde du ${when}`)) setBackups(null);
+                    });
+                  }}>Restaurer</button>
+                </div>
+              )) : <p className="small muted">Aucune.</p>}
             </div>
-          )) : <p className="small muted">Aucune sauvegarde.</p>}
+          ))}
         </Sheet>
       )}
     </div>
   );
 }
 
-/** Restaure un export : toutes les données sont réécrites avec un horodatage neuf pour qu'elles gagnent la synchronisation. */
-async function restore(file: ExportFile) {
-  const now = Date.now();
-  const data: any = {};
-  for (const [c, recs] of Object.entries(file.data)) {
-    data[c] = {};
-    Object.values(recs as any).forEach((r: any, i) => { data[c][r.id] = { ...r, updatedAt: new Date(now + i).toISOString() }; });
-  }
-  await getStore().replaceAll(data);
-  getSync().schedule(200);
+const SAFETY_EVENT = 'lx-safety-backup';
+
+/**
+ * Restauration protégée (logique dans sync.ts, testée dans tests/sync.test.ts) :
+ * confirmation → sauvegarde de sécurité de l'état actuel, enregistrée et VÉRIFIÉE → restauration.
+ * Si la sauvegarde de sécurité échoue, rien n'est modifié. Renvoie true si la restauration a eu lieu.
+ */
+async function safeRestore(ui: ReturnType<typeof useUI>, load: () => Promise<ExportFile>, what: string): Promise<boolean> {
+  if (!(await ui.confirm(
+    `Restaurer ${what} ? Une sauvegarde de sécurité de l’état actuel (y compris les modifications pas encore synchronisées, l’historique des tarifs et des modules) sera d’abord faite et vérifiée : vous pourrez revenir en arrière. Les éléments de la sauvegarde reprendront leur version sauvegardée sur tous vos appareils ; ce qui a été créé depuis est conservé.`,
+    { ok: 'Restaurer', danger: true, title: 'Restaurer une sauvegarde' },
+  ))) return false;
+  const file = await load(); // lue AVANT toute modification : si elle est inaccessible, rien n'est touché
+  if (!validateExport(file)) throw new Error('Sauvegarde non reconnue : rien n’a été modifié.');
+  const store = getStore();
+  const sync = getSync();
+  const safety = await makeSafetyBackup(store, sync.session ? sync : null); // lève une erreur si elle n'est pas vérifiée
+  window.dispatchEvent(new Event(SAFETY_EVENT));
+  if (safety.remote === 'failed' && !(await ui.confirm(
+    `La copie en ligne de la sauvegarde de sécurité n’a pas pu être faite (pas de connexion ?). Elle est enregistrée et vérifiée sur cet appareil, et partira en ligne au retour du réseau. Continuer la restauration ?`,
+    { ok: 'Continuer', danger: true, title: 'Sauvegarde de sécurité' },
+  ))) return false;
+  await restoreExport(file, store, safety);
+  window.dispatchEvent(new Event(SAFETY_EVENT));
+  ui.toast(`Restauré · ${SAFETY_LABEL.toLowerCase()} du ${new Date(safety.madeAt).toLocaleString('fr-FR')} disponible dans Réglages`);
+  return true;
+}
+
+/**
+ * Sauvegardes de sécurité gardées sur cet appareil (la plus récente en premier) : revenir à l'état d'avant une
+ * restauration, y compris hors connexion. Celles pas encore en ligne partent au retour du réseau.
+ */
+function SafetyBackupRow() {
+  const ui = useUI();
+  const [list, setList] = useState<SafetyBackup[]>([]);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const load = () => { safetyBackups().then((v) => setList([...v].reverse())).catch(() => setList([])); };
+    load();
+    window.addEventListener(SAFETY_EVENT, load);
+    const t = window.setInterval(load, 15_000); // affiche « en ligne ✓ » dès que la copie est partie
+    return () => { window.removeEventListener(SAFETY_EVENT, load); clearInterval(t); };
+  }, []);
+  if (!list.length) return null;
+  const waiting = list.filter((s) => !s.remoteId).length;
+  return (
+    <div className="banner soft small" style={{ marginTop: 10, display: 'block' }}>
+      <div><b>{SAFETY_LABEL}</b> · {list.length} sur cet appareil{waiting ? ` · ${waiting} en attente d’envoi en ligne` : ''}</div>
+      {waiting > 0 && (
+        <div className={`banner ${waiting >= SAFETY_WARN ? 'danger' : ''} small`} style={{ display: 'block', margin: '8px 0' }}>
+          {waiting >= SAFETY_MAX
+            ? <>Attention : {waiting} copies attendent d’être envoyées en ligne. <b>Aucune nouvelle restauration n’est possible</b> tant qu’elles ne sont pas parties : reconnectez-vous à Internet.</>
+            : waiting >= SAFETY_WARN
+              ? <>Attention : {waiting} copies attendent d’être envoyées en ligne. Encore {SAFETY_MAX - waiting} restauration(s) possible(s) hors connexion, puis les restaurations seront bloquées jusqu’à leur envoi. Reconnectez-vous dès que possible.</>
+              : <>{waiting} copie(s) pas encore en ligne : elle(s) partira(ont) au retour de la connexion. Elles ne sont jamais supprimées avant.</>}
+        </div>
+      )}
+      {list.map((s, i) => {
+        const when = new Date(s.madeAt).toLocaleString('fr-FR');
+        return (
+          <div key={s.madeAt} className="row between wrap" style={{ gap: 8, padding: '8px 0', borderTop: i ? '1px solid var(--line)' : undefined }}>
+            <span className="col" style={{ gap: 2, minWidth: 0 }}>
+              <span>{when}{i === 0 && <span className="tiny faint"> · la plus récente</span>}</span>
+              <span className="tiny faint">{s.remoteId ? 'Copie en ligne vérifiée ✓ et copie sur cet appareil' : 'Sur cet appareil ; partira en ligne au retour de la connexion'}</span>
+            </span>
+            <button className="btn small" disabled={busy} onClick={async () => {
+              setBusy(true);
+              try { await safeRestore(ui, async () => structuredClone(s.file), `la « ${SAFETY_LABEL} » du ${when} (revenir à l’état d’avant cette restauration)`); }
+              catch (e: any) { ui.toast(String(e?.message ?? e)); }
+              finally { setBusy(false); }
+            }}>{i === 0 ? 'Revenir à l’état d’avant la restauration' : 'Revenir à cet état'}</button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const COLLECTION_LABEL: Record<string, string> = {
+  items: 'Tâche / RDV', series: 'Tâche récurrente', categories: 'Catégorie', objectives: 'Objectif', projects: 'Projet', ideas: 'Idée',
+  habits: 'Habitude', habitLogs: 'Suivi d’habitude', goals: 'Objectif chiffré', goalLogs: 'Suivi d’objectif', challenges: 'Défi', reviews: 'Bilan',
+  settings: 'Réglages', contents: 'Contenu', feeds: 'Feed', acTrainers: 'Formatrice', acVenues: 'Lieu de formation', acOffers: 'Offre Academy',
+  acModules: 'Module pédagogique', acSettings: 'Réglages Academy',
+};
+const FIELD_LABEL: Record<string, string> = {
+  title: 'Titre', name: 'Nom', date: 'Date', start: 'Heure', duration: 'Durée (min)', deadline: 'Échéance', status: 'Statut', priority: 'Priorité',
+  notes: 'Notes', description: 'Description', categoryId: 'Catégorie', client: 'Cliente', service: 'Prestation', actualMinutes: 'Temps réalisé (min)',
+  priceCents: 'Prix (centimes)', capacity: 'Stagiaires', days: 'Jours', startTime: 'Début', endTime: 'Fin', version: 'Version', content: 'Contenu détaillé',
+  objective: 'Objectif', durationMin: 'Durée (min)', publishDate: 'Date de publication', shootDate: 'Date de tournage', deleted: 'Supprimé',
+};
+const HIDDEN_FIELDS = new Set(['id', 'createdAt', 'updatedAt']);
+const showValue = (v: unknown) => v === undefined || v === null || v === '' ? '—' : typeof v === 'boolean' ? (v ? 'Oui' : 'Non') : typeof v === 'object' ? JSON.stringify(v) : String(v);
+
+/** Journal des conflits, en lecture seule : rien n'est jamais perdu en silence, les versions écartées restent consultables. */
+function ConflictSection() {
+  const ui = useUI();
+  const [list, setList] = useState<ConflictView[] | null>(null);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const open = async () => {
+    setBusy(true);
+    try {
+      const { entries, serverError } = await getSync().listConflicts();
+      setNote(serverError ? `Journal du serveur indisponible (${serverError}) : seul celui de cet appareil est affiché.` : '');
+      setList(entries);
+    } catch (e: any) { ui.toast(String(e?.message ?? e)); } finally { setBusy(false); }
+  };
+  return (
+    <div className="card">
+      <div className="card-head"><h3>Journal des conflits</h3></div>
+      <p className="small muted" style={{ marginTop: 0 }}>Quand deux appareils modifient la même fiche, la version la plus récente est gardée. L’autre n’est jamais perdue : elle est conservée ici et reste consultable.</p>
+      <button className="btn" disabled={busy} onClick={open}>Consulter le journal</button>
+      {list && (
+        <Sheet title={`Journal des conflits (${list.length})`} onClose={() => setList(null)}>
+          {note && <div className="banner small" style={{ marginBottom: 10 }}>{note}</div>}
+          {!list.length && <p className="small muted">Aucun conflit : aucune version n’a été écartée.</p>}
+          {list.map((c, i) => {
+            const kept = (c.kept ?? {}) as Record<string, unknown>;
+            const lost = (c.lost ?? {}) as Record<string, unknown>;
+            const keys = [...new Set([...Object.keys(lost), ...Object.keys(kept)])].filter((k) => !HIDDEN_FIELDS.has(k));
+            const changed = keys.filter((k) => JSON.stringify(lost[k]) !== JSON.stringify(kept[k]));
+            const label = String(kept.title ?? kept.name ?? lost.title ?? lost.name ?? c.id);
+            return (
+              <details key={`${c.source}-${c.collection}-${c.id}-${c.at}-${i}`} className="ac-version">
+                <summary className="small"><b>{label}</b> <span className="tiny faint">· {COLLECTION_LABEL[c.collection] ?? c.collection} · {new Date(c.at).toLocaleString('fr-FR')} · {c.source === 'server' ? 'écartée par le serveur' : 'écartée sur cet appareil'}</span></summary>
+                <div className="tiny" style={{ marginTop: 8 }}>
+                  <div className="faint" style={{ marginBottom: 6 }}>Différences entre la version gardée et la version écartée :</div>
+                  {!changed.length && <div className="faint">Aucune différence de contenu.</div>}
+                  <dl className="ac-version-body">
+                    {changed.map((k) => (
+                      <div key={k}>
+                        <dt className="faint">{FIELD_LABEL[k] ?? k}</dt>
+                        <dd>Gardée : {showValue(kept[k])}</dd>
+                        <dd>Écartée : {showValue(lost[k])}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  <details style={{ marginTop: 8 }}>
+                    <summary className="faint">Voir toute la version écartée</summary>
+                    <dl className="ac-version-body">
+                      {keys.filter((k) => lost[k] !== undefined).map((k) => <div key={k}><dt className="faint">{FIELD_LABEL[k] ?? k}</dt><dd>{showValue(lost[k])}</dd></div>)}
+                    </dl>
+                  </details>
+                </div>
+              </details>
+            );
+          })}
+          <p className="tiny faint">Consultation uniquement : ce journal ne modifie aucune donnée.</p>
+        </Sheet>
+      )}
+    </div>
+  );
 }
 
 function BackupSection() {
   const ui = useUI();
   const [persisted, setPersisted] = useState<boolean | null>(null);
   useEffect(() => { navigator.storage?.persisted?.().then(setPersisted).catch(() => setPersisted(null)); }, []);
-  const download = () => {
-    const blob = new Blob([JSON.stringify(exportData(), null, 1)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `lx-planner-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  };
+  const download = () => { runExport(ui); };
+  useData(); // se met à jour quand la date du dernier export change
+  const lastExport = getStore().settings?.lastExportAt;
   const upload = async (f: File | undefined) => {
     if (!f) return;
     try {
       const json = JSON.parse(await f.text());
       if (!validateExport(json)) throw new Error('Fichier non reconnu');
-      if (!(await ui.confirm(`Remplacer toutes les données par la sauvegarde du ${new Date(json.exportedAt).toLocaleString('fr-FR')} ?`, { ok: 'Restaurer', danger: true }))) return;
-      await restore(json);
-      ui.toast('Sauvegarde restaurée');
+      await safeRestore(ui, async () => json, `${json.label ? `la « ${json.label} »` : 'la sauvegarde'} du ${new Date(json.exportedAt).toLocaleString('fr-FR')}`);
     } catch (e: any) {
-      ui.toast(`Import impossible : ${e?.message ?? e}`);
+      ui.toast(`Restauration impossible : ${e?.message ?? e}`);
     }
   };
   return (
@@ -174,11 +333,13 @@ function BackupSection() {
         <button className="btn" onClick={download}><IconDownload size={16} /> Exporter mes données (.json)</button>
         <label className="btn" style={{ cursor: 'pointer' }}><IconUpload size={16} /> Restaurer un fichier<input type="file" accept="application/json,.json" hidden onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ''; }} /></label>
       </div>
+      <p className="small muted" style={{ marginTop: 8 }}>Dernier export : {lastExport ? new Date(lastExport).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' }) : 'pas encore noté'}. Un rappel s’affiche si aucun export n’a été fait depuis 30 jours.</p>
       <p className="small muted" style={{ marginBottom: 0 }}>
         Stockage de cet appareil : {persisted === true ? 'protégé contre l’effacement automatique ✓' : persisted === false ? 'non protégé' : 'statut inconnu'}.
         {persisted === false && <> <button className="btn small" onClick={async () => setPersisted(await navigator.storage.persist())}>Demander la protection</button></>}
         {' '}Sur iPhone, ajoutez l’app à l’écran d’accueil : Safari peut sinon effacer les données d’un site non utilisé pendant 7 jours.
       </p>
+      <SafetyBackupRow />
     </div>
   );
 }

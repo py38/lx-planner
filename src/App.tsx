@@ -2,6 +2,9 @@ import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { useRoute, href } from './lib/router';
 import { getStore, useData, useSaveStatus } from './data/store';
 import { getSync } from './data/sync';
+import { runExport } from './data/exportFlow';
+import { ACADEMY_VISIBLE } from './config';
+import { exportReminderDue, daysSinceExport, snoozeUntil } from './logic/exportReminder';
 import { UIProvider, useUI } from './ui/UI';
 import { computeAlerts } from './logic/alerts';
 import { notifyDue } from './logic/reminders';
@@ -17,8 +20,9 @@ import { SettingsView } from './views/SettingsView';
 import { ImportView } from './views/ImportView';
 import { AlertsView } from './views/AlertsView';
 import { ContentHub } from './views/content/ContentHub';
+import { AcademyView } from './views/academy/AcademyView';
 import {
-  IconMonth, IconInsta, IconProjects, IconHabit, IconStats, IconSettings, IconPlus, IconBell, IconCamera, IconMenu,
+  IconMonth, IconInsta, IconProjects, IconHabit, IconStats, IconSettings, IconPlus, IconBell, IconCamera, IconMenu, IconAcademy,
 } from './ui/Icons';
 import { useState } from 'react';
 
@@ -39,6 +43,7 @@ function Page({ route }: { route: string[] }) {
     case 'import': return <ImportView />;
     case 'alertes': return <AlertsView />;
     case 'contenu': return <ContentHub route={route} />;
+    case 'academy': return ACADEMY_VISIBLE ? <AcademyView route={route} /> : <DayView date={today()} />;
     default: return <DayView date={today()} />;
   }
 }
@@ -77,15 +82,17 @@ function Shell() {
   const nav = [
     { key: 'calendrier', path: `jour/${t}`, label: 'Calendrier', icon: IconMonth },
     { key: 'contenu', path: 'contenu/idees', label: 'Instagram & Contenu', icon: IconInsta },
+    { key: 'academy', path: 'academy', label: 'LX Academy', icon: IconAcademy },
     { key: 'projets', path: 'projets', label: 'Projets & Objectifs', icon: IconProjects },
     { key: 'habitudes', path: `habitudes/${t}`, label: 'Mes habitudes', icon: IconHabit },
     { key: 'bilans', path: 'bilans', label: 'Bilans & Statistiques', icon: IconStats },
-  ];
+  ].filter((n) => ACADEMY_VISIBLE || n.key !== 'academy'); // interrupteur de retour en arrière (src/config.ts)
   const rawCur = route[0] || 'jour';
   // Jour / Semaine / Mois / Année = un seul onglet « Calendrier » (sélecteur en haut de page)
   const cur = ['jour', 'semaine', 'mois', 'annee'].includes(rawCur) ? 'calendrier' : rawCur === 'idees' ? 'contenu' : rawCur;
-  const mobileMain = ['calendrier', 'contenu', 'projets', 'habitudes'];
-  const short: Record<string, string> = { projets: 'Projets', habitudes: 'Habitudes', idees: 'Idées', contenu: 'Contenu' };
+  // Barre du bas iPhone : Academy directement accessible (sans passer par « Plus »), rien n'est retiré
+  const mobileMain = ['calendrier', 'contenu', 'academy', 'projets', 'habitudes'];
+  const short: Record<string, string> = { projets: 'Projets', habitudes: 'Habitudes', idees: 'Idées', contenu: 'Contenu', academy: 'Academy' };
 
   return (
     <div className="app">
@@ -109,6 +116,7 @@ function Shell() {
             <IconBell size={20} />{alerts.count > 0 && <span className="badge" style={{ position: 'absolute', top: -2, right: -2, minWidth: 16, height: 16, fontSize: 10 }}>{alerts.count}</span>}
           </a>
         </div>
+        <ExportReminder />
         <Page route={route} />
       </main>
 
@@ -140,5 +148,26 @@ export function App() {
     <UIProvider>
       <Shell />
     </UIProvider>
+  );
+}
+
+/** Rappel mensuel : « Pense à exporter tes données ». Ne fait rien tout seul : l'utilisatrice choisit. */
+function ExportReminder() {
+  useData();
+  const ui = useUI();
+  const s = getStore().settings;
+  if (!exportReminderDue(s)) return null;
+  const d = daysSinceExport(s);
+  return (
+    <div className="banner soft small" style={{ marginBottom: 10, flexWrap: 'wrap' }} role="status">
+      <span style={{ flex: '1 1 200px' }}>
+        <strong>Pense à exporter tes données.</strong>{' '}
+        {d === undefined ? 'Aucun export noté pour l’instant.' : `Dernier export il y a ${d} jours.`} Garde le fichier en lieu sûr (iCloud Drive, clé USB…).
+      </span>
+      <span className="row" style={{ gap: 6 }}>
+        <button className="btn small primary" onClick={() => { runExport(ui); }}>Exporter maintenant</button>
+        <button className="btn small" onClick={() => s && getStore().update('settings', s.id, { exportReminderSnoozedUntil: snoozeUntil() })}>Plus tard</button>
+      </span>
+    </div>
   );
 }
